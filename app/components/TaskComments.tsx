@@ -1,17 +1,15 @@
 "use client";
 
-import { useEffect, useId, useState, type FormEvent } from "react";
-import { ApiError, addComment, listComments, type Comment, type FieldErrors } from "@/lib/api";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { ApiError, addComment, listCommentsPage, type Comment, type FieldErrors } from "@/lib/api";
+import { isRefreshing, pageCount, usePagedList } from "@/lib/hooks";
+import { RefreshingNote } from "./formHelpers";
+import Pagination from "./Pagination";
 
 export const AUTHOR_MAX = 100;
 export const BODY_MAX = 2000;
 
 const TASK_GONE = "This task no longer exists. It may have been deleted.";
-
-type CommentsState =
-  | { taskId: number; status: "loading" }
-  | { taskId: number; status: "ready"; comments: Comment[] }
-  | { taskId: number; status: "error"; message: string };
 
 function errorMessage(err: unknown): string {
   if (err instanceof ApiError && err.status === 404) return TASK_GONE;
@@ -29,35 +27,36 @@ interface TaskCommentsProps {
 
 export default function TaskComments({ taskId }: TaskCommentsProps) {
   const id = useId();
-  const [state, setState] = useState<CommentsState>({ taskId, status: "loading" });
+  const [shownTaskId, setShownTaskId] = useState(taskId);
+  const [reloadKey, setReloadKey] = useState(0);
   const [author, setAuthor] = useState("");
   const [body, setBody] = useState("");
   const [posting, setPosting] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [postError, setPostError] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
+  const currentTaskId = useRef(taskId);
 
-  // Reset per-task state during render when the task changes, so the effect only sets state from async callbacks.
-  if (state.taskId !== taskId) {
-    setState({ taskId, status: "loading" });
+  useEffect(() => {
+    currentTaskId.current = taskId;
+  }, [taskId]);
+
+  // Reset per-task form state during render when the task changes.
+  if (shownTaskId !== taskId) {
+    setShownTaskId(taskId);
+    setBody("");
+    setPosting(false);
     setFieldErrors({});
     setPostError(null);
     setAnnouncement("");
   }
 
-  useEffect(() => {
-    let active = true;
-    listComments(taskId)
-      .then((comments) => {
-        if (active) setState({ taskId, status: "ready", comments });
-      })
-      .catch((err: unknown) => {
-        if (active) setState({ taskId, status: "error", message: errorMessage(err) });
-      });
-    return () => {
-      active = false;
-    };
-  }, [taskId]);
+  const comments = usePagedList<Comment>({
+    listKey: "comments",
+    filterKey: String(taskId),
+    reloadKey,
+    load: (params) => listCommentsPage(taskId, params),
+  });
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -68,20 +67,21 @@ export default function TaskComments({ taskId }: TaskCommentsProps) {
     setPostError(null);
     setAnnouncement("");
     try {
-      const comment = await addComment(target, { author, body });
-      setState((prev) =>
-        prev.taskId === target && prev.status === "ready"
-          ? { ...prev, comments: [...prev.comments, comment] }
-          : prev,
-      );
+      await addComment(target, { author, body });
+      // Another task was opened while posting; its form and list are not this post's to change.
+      if (currentTaskId.current !== target) return;
+      // Comments are oldest first, so the new one is on the last page.
+      comments.setPaging({ page: pageCount(comments.total + 1, comments.pageSize), pageSize: comments.pageSize });
+      setReloadKey((k) => k + 1);
       setBody("");
       setAnnouncement("Update added");
     } catch (err) {
+      if (currentTaskId.current !== target) return;
       const fields = err instanceof ApiError ? err.fields : {};
       setFieldErrors(fields);
       if (!fields.author && !fields.body) setPostError(`Could not add update: ${errorMessage(err)}`);
     } finally {
-      setPosting(false);
+      if (currentTaskId.current === target) setPosting(false);
     }
   }
 
@@ -111,16 +111,21 @@ export default function TaskComments({ taskId }: TaskCommentsProps) {
         {announcement}
       </p>
 
-      {state.status === "loading" && <p aria-live="polite">Loading updates…</p>}
-      {state.status === "error" && (
+      {!comments.loaded && comments.status === "loading" && <p aria-live="polite">Loading updates…</p>}
+      {comments.status === "error" && (
         <p role="alert" className="banner">
-          Could not load updates: {state.message}
+          Could not load updates: {errorMessage(comments.error)}
         </p>
       )}
-      {state.status === "ready" && state.comments.length === 0 && <p>No updates yet.</p>}
-      {state.status === "ready" && state.comments.length > 0 && (
-        <ol className="comment-list">
-          {state.comments.map((comment) => (
+      {comments.loaded && comments.total === 0 && <p>No updates yet.</p>}
+      <RefreshingNote active={isRefreshing(comments)} />
+      {comments.loaded && comments.items.length > 0 && (
+        <ol
+          className="comment-list"
+          start={(comments.page - 1) * comments.pageSize + 1}
+          aria-busy={isRefreshing(comments)}
+        >
+          {comments.items.map((comment) => (
             <li key={comment.id} className="comment">
               <p className="comment-meta">
                 <strong>{comment.author}</strong>{" "}
@@ -130,6 +135,15 @@ export default function TaskComments({ taskId }: TaskCommentsProps) {
             </li>
           ))}
         </ol>
+      )}
+      {comments.loaded && comments.total > 0 && (
+        <Pagination
+          label="Updates pages"
+          page={comments.page}
+          pageSize={comments.pageSize}
+          total={comments.total}
+          onChange={comments.setPaging}
+        />
       )}
 
       <form
@@ -175,7 +189,8 @@ export default function TaskComments({ taskId }: TaskCommentsProps) {
         </div>
 
         <div className="actions">
-          <button type="submit" disabled={posting}>
+          {/* Not disabled while posting, so keyboard focus stays on it inside dialogs; a second submit is ignored. */}
+          <button type="submit" aria-disabled={posting}>
             {posting ? "Adding…" : "Add update"}
           </button>
         </div>

@@ -1,5 +1,5 @@
-import TaskManager from "./components/TaskManager";
+import ProjectsView from "./components/ProjectsView";
 
 export default function Page() {
-  return <TaskManager />;
+  return <ProjectsView />;
 }
