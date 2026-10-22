@@ -147,4 +147,14 @@ vitest.config.mts
 
 - This repository contains only the frontend; it does not include the Go API or PostgreSQL schema.
 - The app is currently designed for local development and has no sign-in/authentication flow.
-- The task assistant is backed by rule-based backend logic; it is not an LLM integration.
+- The assistant handles supported task actions deterministically and sends free-form questions to Gemini through the Go backend when the server-side API key is configured.
+
+## AI assistant
+
+The assistant UI sends chat messages to the Go backend's `/api/chat` endpoint.
+The backend handles supported task commands and status queries deterministically
+and uses Gemini for free-form questions when configured.
+
+The Gemini API key is kept exclusively in the backend environment. It must
+never be placed in frontend code or exposed through a `NEXT_PUBLIC_` variable.
+See the backend repository README for Gemini configuration and usage details.
